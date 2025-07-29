@@ -1,5 +1,6 @@
 import fitz  # pip install pymupdf
 
+
 def extract_with_layout(path):
     doc = fitz.open(path)
     pages = []
@@ -16,3 +17,4 @@ def extract_with_layout(path):
                     })
         pages.append(blocks)
     return pages
+
