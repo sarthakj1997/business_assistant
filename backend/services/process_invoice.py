@@ -7,30 +7,73 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+from typing import List, Optional
+from pydantic import BaseModel, Field
+
 class LineItem(BaseModel):
-    description: str
-    quantity: Optional[float] = None
-    unit_price: Optional[float] = None
-    line_total: float
+    product_id: Optional[str] = Field(
+        None, description="SKU or product identifier"
+    )
+    product_name: str = Field(
+        ..., description="Name or description of the product"
+    )
+    quantity: Optional[int] = Field(
+        None, description="Number of units"
+    )
+    unit_price: Optional[float] = Field(
+        None, description="Price per single unit"
+    )
+    line_total: Optional[float] = Field(
+        None, description="Total for this line (unit_price * quantity)"
+    )
+    confidence_score: Optional[float] = Field(
+        None, description="Extraction confidence 0–1"
+    )
 
 class InvoiceSummary(BaseModel):
-    vendor_name: str
-    vendor_address: Optional[str]
-    customer_name: Optional[str]
-    customer_address: Optional[str]
-    invoice_number: str
-    invoice_date: str
-    due_date: Optional[str]
-    purchase_order: Optional[str]
-    currency: str
-    items: List[LineItem]
-    subtotal: Optional[float]
-    tax: Optional[float]
-    shipping: Optional[float]
-    total: float
-    payment_terms: Optional[str]
-    payment_method: Optional[str]
-    confidence_score: float
+    # Invoice / order identifiers
+    order_id: str = Field(..., description="Order or invoice number")
+    customer_id: Optional[str] = Field(
+        None, description="Customer ID from the document"
+    )
+    invoice_date: str = Field(
+        ..., description="Order or invoice date (ISO 8601 YYYY‑MM‑DD)"
+    )
+
+    # Customer contact & address
+    contact_name: Optional[str] = Field(
+        None, description="Customer contact person"
+    )
+    address: Optional[str] = Field(
+        None, description="Street address"
+    )
+    city: Optional[str] = Field(
+        None, description="City"
+    )
+    postal_code: Optional[str] = Field(
+        None, description="Postal or ZIP code"
+    )
+    country: Optional[str] = Field(
+        None, description="Country"
+    )
+    customer_phone: Optional[str] = Field(
+        None, description="Customer phone number"
+    )
+    customer_fax: Optional[str] = Field(
+        None, description="Customer fax number"
+    )
+
+    # Line items & totals
+    items: List[LineItem] = Field(
+        ..., description="List of purchased products or services"
+    )
+    total_price: float = Field(
+        ..., description="Grand total at bottom of invoice"
+    )
+    confidence_score: float = Field(
+        ..., description="Overall extraction confidence 0–1"
+    )
+
 
 client = OpenAI(
     base_url="https://api.groq.com/openai/v1",
@@ -38,58 +81,48 @@ client = OpenAI(
 )
 
 SYSTEM_PROMPT = """
-You are an invoice parser.
-Input: a JSON object with key "pages", whose value is a list of pages:
-  {
-    "pages": [
-      {
-        "page": <int>,
-        "blocks": [
-          {"text": <string>, "bbox": [x0, y0, x1, y1]},
-          …
-        ]
-      },
-      …
-    ]
-  }
+You are an expert invoice‑parsing assistant. You will receive a single JSON object with one key, "pages", whose value is an array of page objects containing all raw text and layout data from an invoice. Your job is to output a single JSON object that exactly matches the following Pydantic schema. Do not output any extra keys, comments, or explanations—only the JSON object.
 
-Extract exactly these fields and return a single JSON matching InvoiceSummary:
+Pydantic schema to match:
 
-Parties:
-• vendor_name (string)  
-• vendor_address (string or null)  
-• customer_name (string or null)  
-• customer_address (string or null)  
+InvoiceSummary {
+  order_id: string
+  customer_id: string | null
+  invoice_date: string            // ISO 8601 date, e.g. "2025-07-30"
+  contact_name: string | null
+  address: string | null
+  city: string | null
+  postal_code: string | null
+  country: string | null
+  customer_phone: string | null
+  customer_fax: string | null
+  items: [
+    {
+      product_id: string | null
+      product_name: string
+      quantity: integer | null
+      unit_price: number | null
+      line_total: number | null    // unit_price * quantity
+      confidence_score: number | null  // 0.0–1.0
+    },
+    …
+  ]
+  total_price: number
+  confidence_score: number         // 0.0–1.0 overall
+}
 
-Metadata:
-• invoice_number (string)  
-• invoice_date (string, format DD‑MM‑YYYY)  
-• due_date (string, format DD‑MM‑YYYY or null)  
-• purchase_order (string or null)  
-• currency (string, any ISO 4217 code, e.g. "USD", "INR", "EUR")  
+Rules:
+1. Output strictly valid JSON with exactly these keys, in this order.
+2. Use null for any optional field you cannot find.
+3. Dates must be ISO 8601 format (YYYY‑MM‑DD).
+4. Quantities must be integers; unit_price, line_total, total_price, and confidence_score must be numbers.
+5. Calculate line_total as unit_price * quantity when both values are available.
+6. Infer line items by grouping contiguous rows of product identifier/name/quantity/price data.
+7. For each line item, assign a confidence_score between 0.0 and 1.0 reflecting your extraction certainty.
+8. Assign an overall confidence_score (0.0–1.0) for the entire invoice extraction.
+9. The input "pages" array may have varied layout; locate invoice metadata (order_id, invoice_date, customer_id), customer contact/address block, the itemized products table, and the final total, then map each to the schema above.
 
-Line items & totals:
-• items: list of objects each with  
-    – description (string)  
-    – quantity (float or null)  
-    – unit_price (float or null)  
-    – line_total (float)  
-• subtotal (float or null) — sum of all line_total before tax  
-• tax (float or null)  
-• shipping (float or null)  
-• total (float) — **take the exact "Total" or "Amount Due" value printed on the invoice (already includes tax), do not add subtotal + tax yourself**  
-
-Payment:
-• payment_terms (string or null)  
-• payment_method (string or null)  
-
-AI metadata:
-• confidence_score (float between 0.0 and 100.0) — measure how well you extracted all fields; err on the low side  
-
-**Requirements:**
-- Return **only** the JSON object—no markdown, no commentary.  
-- Use `null` for any missing or optional field.  
-- Dates must be in `DD-MM-YYYY` format.  
+Return only the JSON object representing the InvoiceSummary.
 """
 
 def process_invoice(pages: List[dict]) -> InvoiceSummary:

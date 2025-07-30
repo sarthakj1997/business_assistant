@@ -1,8 +1,9 @@
+# backend/main.py (updated)
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from loguru import logger
 
-from backend.routers import upload_pdf
+from backend.routers import upload_pdf, rag
 
 app = FastAPI()
 
@@ -25,3 +26,4 @@ async def log_requests(request: Request, call_next):
 
 # Include all routers
 app.include_router(upload_pdf.router, prefix="/upload")
+app.include_router(rag.router, prefix="/rag")
