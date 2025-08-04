@@ -14,7 +14,9 @@ class AgentRAGService:
     
     def answer_question(self, question: str, user_id: int = None) -> Dict:
         """Return structured response with thinking, answer, and sources"""
-        
+        order_id = self._is_exact_order_query(question)
+        if order_id:
+            return self._handle_exact_order_query(order_id, user_id)
         # Step 1: Vector search and metadata extraction
         vector_results = search_invoices(question, user_id, top_k=20)
         metadata_context = self._extract_metadata_context(vector_results)
@@ -52,7 +54,7 @@ class AgentRAGService:
         }
     
     def _format_vector_sources(self, results: List[Dict]) -> List[Dict]:
-        """Format vector search results as sources"""
+        """Format vector search results as sources - Updated for new structure"""
         sources = []
         for i, result in enumerate(results):
             metadata = result['metadata']
@@ -60,77 +62,100 @@ class AgentRAGService:
                 "rank": i + 1,
                 "score": round(result.get('score', 0), 3),
                 "type": metadata.get('type'),
-                "source_id": metadata.get('invoice_id') or metadata.get('order_id')
+                "order_id": metadata.get('order_id')
             }
             
             if metadata['type'] == 'invoice':
                 source.update({
-                    "order_id": metadata.get('order_id'),
                     "customer": metadata.get('contact_name'),
                     "date": metadata.get('invoice_date'),
-                    "total": metadata.get('total_price')
+                    "total": metadata.get('total_price'),
+                    "city": metadata.get('city'),
+                    "country": metadata.get('country')
                 })
-            else:
+            elif metadata['type'] == 'products':
+                source.update({
+                    "customer": metadata.get('contact_name'),
+                    "product_count": metadata.get('product_count'),
+                    "products": metadata.get('products', [])
+                })
+            else:  # line_item
                 source.update({
                     "product": metadata.get('product_name'),
                     "quantity": metadata.get('quantity'),
-                    "price": metadata.get('unit_price')
+                    "price": metadata.get('unit_price'),
+                    "customer": metadata.get('contact_name')
                 })
             
             sources.append(source)
         
         return sources
     
+
     def _generate_combined_answer(self, question: str, vector_results: List[Dict], 
-                                 sql_results: List[Dict], metadata_context: Dict) -> str:
+                             sql_results: List[Dict], metadata_context: Dict) -> str:
         """Generate final answer using both sources"""
         
         vector_context = self._format_vector_context(vector_results[:5])
         sql_context = self._format_sql_context(sql_results)
         
-        prompt = f"""You are answering a business question. Provide ONLY the final answer - no thinking or analysis.
+        prompt = f"""Answer the business question with ONLY the essential facts. Be direct and concise.
 
-Vector Context:
-{vector_context}
+    Vector Context:
+    {vector_context}
 
-SQL Results:
-{sql_context}
+    SQL Results:
+    {sql_context}
 
-Question: {question}
+    Question: {question}
 
-Provide a direct, factual answer using the data above."""
+    Rules:
+    - Give only the key facts requested
+    - Use bullet points for multiple items
+    - No explanations or background
+    - Maximum 2-3 sentences
+
+    Answer:"""
 
         response = self.client.chat.completions.create(
             model=self.model,
             messages=[{"role": "user", "content": prompt}],
             temperature=0,
-            max_tokens=300
+            max_tokens=200  # Reduced to force conciseness
         )
         
         return response.choices[0].message.content
-    
+
     def _generate_vector_answer(self, question: str, vector_results: List[Dict]) -> str:
         """Generate answer using vector results only"""
         
         context = self._format_vector_context(vector_results)
         
-        prompt = f"""Answer the question directly using the invoice data below. No analysis - just the answer.
+        prompt = f"""Answer directly with only the requested information. Be concise.
 
-Data:
-{context}
+    Data:
+    {context}
 
-Question: {question}
+    Question: {question}
 
-Answer:"""
+    Rules:
+    - State only the facts asked for
+    - No extra details or context
+    - Maximum 2 sentences
+
+    Answer:"""
 
         response = self.client.chat.completions.create(
             model=self.model,
             messages=[{"role": "user", "content": prompt}],
             temperature=0,
-            max_tokens=300
+            max_tokens=150  # Reduced for brevity
         )
         
         return response.choices[0].message.content
+
+
+
     
     def _extract_metadata_context(self, vector_results: List[Dict]) -> Dict:
         """Extract useful metadata for filtering and context"""
@@ -325,19 +350,30 @@ Answer with specific details from the data provided."""
         return response.choices[0].message.content
     
     def _format_vector_context(self, results: List[Dict]) -> str:
+        """Updated context formatting for new vector structure"""
         context_parts = []
         for result in results:
             metadata = result['metadata']
+            
             if metadata['type'] == 'invoice':
                 context_parts.append(
-                    f"Order {metadata.get('order_id')}: {metadata.get('contact_name')}, "
-                    f"Date: {metadata.get('invoice_date')}, Total: ${metadata.get('total_price')}"
+                    f"Invoice {metadata.get('order_id')}: Customer {metadata.get('contact_name')}, "
+                    f"Date: {metadata.get('invoice_date')}, Total: ${metadata.get('total_price')}, "
+                    f"Location: {metadata.get('city')}, {metadata.get('country')}"
                 )
-            else:
+            elif metadata['type'] == 'products':
+                products = metadata.get('products', [])
+                context_parts.append(
+                    f"Order {metadata.get('order_id')} products: {', '.join(products[:3])}... "
+                    f"({metadata.get('product_count')} total items)"
+                )
+            else:  # line_item
                 context_parts.append(
                     f"Product: {metadata.get('product_name')}, "
-                    f"Qty: {metadata.get('quantity')}, Price: ${metadata.get('unit_price')}"
+                    f"Qty: {metadata.get('quantity')}, Price: ${metadata.get('unit_price')}, "
+                    f"Order: {metadata.get('order_id')}"
                 )
+        
         return "\n".join(context_parts)
     
     def _format_sql_context(self, results: List[Dict]) -> str:
@@ -345,3 +381,64 @@ Answer with specific details from the data provided."""
             return "No structured data available"
         
         return json.dumps(results, indent=2, default=str)
+
+    def _is_exact_order_query(self, question: str) -> str:
+        """Check if question asks for specific order ID"""
+        import re
+        patterns = [
+            r"order id (\d+)",
+            r"order (\d+)",
+            r"invoice (\d+)"
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, question.lower())
+            if match:
+                return match.group(1)
+        return None
+
+    def _handle_exact_order_query(self, order_id: str, user_id: int) -> Dict:
+        """Handle exact order ID queries with direct SQL"""
+        db = SessionLocal()
+        try:
+            query = text("""
+                SELECT i.order_id, i.contact_name, i.invoice_date, i.total_price,
+                    li.product_name, li.quantity, li.unit_price, li.line_total
+                FROM invoices i
+                LEFT JOIN line_items li ON i.id = li.invoice_id
+                WHERE i.order_id = :order_id
+                AND (:user_id IS NULL OR i.user_id = :user_id)
+            """)
+            
+            result = db.execute(query, {"order_id": order_id, "user_id": user_id})
+            rows = result.fetchall()
+            
+            if not rows:
+                return {
+                    "thinking": [f"🔍 Searched for exact order ID {order_id}", "❌ No invoice found with this order ID"],
+                    "answer": f"No invoice found with Order ID {order_id}.",
+                    "sources": {"database_query": str(query), "sql_results": []}
+                }
+            
+            # Format response
+            invoice_info = rows[0]
+            answer = f"Invoice {order_id}:\n"
+            answer += f"Customer: {invoice_info.contact_name}\n"
+            answer += f"Date: {invoice_info.invoice_date}\n"
+            answer += f"Total: ${invoice_info.total_price}\n\n"
+            
+            if invoice_info.product_name:
+                answer += "Line Items:\n"
+                for row in rows:
+                    if row.product_name:
+                        answer += f"• {row.product_name}: {row.quantity} units @ ${row.unit_price} = ${row.line_total}\n"
+            
+            return {
+                "thinking": [f"🔍 Direct SQL query for order ID {order_id}", f"✅ Found invoice with {len(rows)} line items"],
+                "answer": answer,
+                "sources": {"database_query": str(query), "sql_results": [dict(row._mapping) for row in rows]}
+            }
+            
+        finally:
+            db.close()
+

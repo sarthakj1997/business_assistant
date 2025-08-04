@@ -1,0 +1,20 @@
+{
+  "retrieval": {
+    "precision@5": 0.2571428571428572,
+    "recall@10": 0.7142857142857143,
+    "mrr": 0.6
+  },
+  "answer_quality": {
+    "entity_accuracy": 0.6428571428571429,
+    "factual_accuracy": 0.6428571428571429
+  },
+  "performance": {
+    "avg_response_time": 3.2241218430655345,
+    "max_response_time": 3.4804883003234863,
+    "min_response_time": 2.9693634510040283
+  },
+  "strategy": {
+    "strategy_accuracy": 0.14285714285714285
+  },
+  "overall_score": 0.5328571428571429
+}
