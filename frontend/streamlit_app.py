@@ -2,9 +2,10 @@ import streamlit as st
 import requests
 import json
 import pandas as pd
+import os
 
 # FastAPI backend URL
-API_BASE_URL = "http://localhost:8000"
+API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:8000")
 
 st.title("Business Assistant - Invoice RAG")
 

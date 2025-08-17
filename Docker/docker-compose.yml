@@ -1,0 +1,48 @@
+# docker-compose.yml
+services:
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: finance_db
+      POSTGRES_USER: sarthak
+      POSTGRES_PASSWORD: hello1234
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sarthak -d finance_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build: 
+      context: ..
+      dockerfile: Docker/Dockerfile.backend
+    env_file:
+      - .env.docker
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      - DATABASE_URL=postgresql+psycopg2://sarthak:hello1234@postgres:5432/finance_db
+
+  frontend:
+    build:
+      context: ..
+      dockerfile: Docker/Dockerfile.frontend
+    env_file:
+      - .env.docker
+    environment:
+      - API_BASE_URL=http://backend:8000
+    ports:
+      - "8501:8501"
+    depends_on:
+      backend:
+        condition: service_started
+
+volumes:
+  postgres_data:
